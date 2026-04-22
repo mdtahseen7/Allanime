@@ -1,0 +1,19 @@
+# Node.js
+node_modules/
+package-lock.json
+
+# Environment
+.env
+
+# Editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
