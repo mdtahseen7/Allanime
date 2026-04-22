@@ -4,6 +4,24 @@ A fast, lightweight Node.js API to search anime, get episode lists, and stream v
 
 ## Setup
 
+### Option 1: Cloudflare Workers (Recommended)
+
+Host the API on Cloudflare's global edge network for free. It is fully stateless, serverless, and highly performant.
+
+```bash
+cd worker
+npm install
+npm run deploy
+```
+
+*This will prompt you to log into your Cloudflare account and deploy the API to a `*.workers.dev` domain.*
+
+---
+
+### Option 2: Local / Node.js Server
+
+Run the API as a standard Node.js Express server.
+
 ```bash
 npm install
 npm start
