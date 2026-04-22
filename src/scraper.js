@@ -5,7 +5,7 @@ const AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/2010010
 const ALLANIME_REFR = "https://allmanga.to";
 const ALLANIME_BASE = "allanime.day";
 const ALLANIME_API = `https://api.${ALLANIME_BASE}`;
-const ALLANIME_KEY = crypto.createHash('sha256').update('SimtVuagFbGR2K7P').digest('hex');
+const ALLANIME_KEY = crypto.createHash('sha256').update('Xot36i3lK3:v1').digest('hex');
 
 const axiosInstance = axios.create({
     headers: {
@@ -18,8 +18,10 @@ const axiosInstance = axios.create({
 function decrypt(blob) {
     try {
         const data = Buffer.from(blob, 'base64');
-        const iv = data.slice(0, 12);
-        const ciphertext = data.slice(12);
+        // New format (v4.13): skip 1st byte (version), IV = next 12 bytes, last 16 bytes = auth tag, middle = ciphertext
+        const iv = data.slice(1, 13);
+        const ctLen = data.length - 13 - 16;
+        const ciphertext = data.slice(13, 13 + ctLen);
         const ctr = Buffer.concat([iv, Buffer.from([0, 0, 0, 2])]);
         
         const decipher = crypto.createDecipheriv('aes-256-ctr', Buffer.from(ALLANIME_KEY, 'hex'), ctr);
