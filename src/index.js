@@ -67,7 +67,8 @@ app.get('/episode_url', async (req, res) => {
         if (!url) return res.status(404).json({ error: "Episode not found or URL not available" });
         res.json({ episode_url: url, mode });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        const status = e.message && e.message.startsWith('NEED_CAPTCHA') ? 503 : 500;
+        res.status(status).json({ error: e.message });
     }
 });
 
@@ -127,7 +128,8 @@ app.get('/play', async (req, res) => {
 
     } catch (e) {
         if (!res.headersSent) {
-            res.status(500).json({ error: e.message });
+            const status = e.message && e.message.startsWith('NEED_CAPTCHA') ? 503 : 500;
+            res.status(status).json({ error: e.message });
         }
     }
 });

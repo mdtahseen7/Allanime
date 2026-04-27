@@ -2,6 +2,12 @@
 node_modules/
 package-lock.json
 
+# Wrangler
+.wrangler/
+worker/.wrangler/
+worker/node_modules/
+worker/package-lock.json
+
 # Environment
 .env
 

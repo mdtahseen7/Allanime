@@ -3,6 +3,9 @@ const ALLANIME_REFR = "https://allmanga.to";
 const ALLANIME_BASE = "allanime.day";
 const ALLANIME_API = `https://api.${ALLANIME_BASE}`;
 
+// Persisted query hash for episode embeds (from ani-cli v4.14.0)
+const EPISODE_QUERY_HASH = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
+
 let ALLANIME_KEY = null;
 
 async function getKey() {
@@ -11,11 +14,6 @@ async function getKey() {
     const keyData = await crypto.subtle.digest('SHA-256', enc.encode('Xot36i3lK3:v1'));
     ALLANIME_KEY = await crypto.subtle.importKey('raw', keyData, { name: 'AES-CTR' }, false, ['decrypt']);
     return ALLANIME_KEY;
-}
-
-function keyHex() {
-    // Precomputed SHA-256 hex of 'Xot36i3lK3:v1' — used only for logging, not crypto
-    return null;
 }
 
 async function decrypt(blob) {
@@ -39,6 +37,76 @@ async function decrypt(blob) {
     } catch (e) {
         return null;
     }
+}
+
+// Base64url to raw bytes helper
+function b64urlDecode(b64url) {
+    let padded = b64url;
+    const mod = padded.length % 4;
+    if (mod === 2) padded += '==';
+    else if (mod === 3) padded += '=';
+    const b64 = padded.replace(/-/g, '+').replace(/_/g, '/');
+    return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
+
+// Filemoon provider decryption (v4.14.0)
+async function getFilemoonLinks(providerPath) {
+    const allLinks = [];
+    const fetchUrl = providerPath.startsWith('http') ? providerPath : `https://${ALLANIME_BASE}${providerPath}`;
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 4000);
+        const response = await fetch(fetchUrl, {
+            headers: { 'User-Agent': AGENT, 'Referer': ALLANIME_REFR },
+            signal: controller.signal
+        });
+        clearTimeout(timeout);
+        const fmData = await response.json();
+
+        if (fmData && fmData.iv && fmData.payload && fmData.key_parts) {
+            const kp1Bytes = b64urlDecode(fmData.key_parts[0]);
+            const kp2Bytes = b64urlDecode(fmData.key_parts[1]);
+            // Concatenate key parts
+            const keyBytes = new Uint8Array(kp1Bytes.length + kp2Bytes.length);
+            keyBytes.set(kp1Bytes, 0);
+            keyBytes.set(kp2Bytes, kp1Bytes.length);
+
+            const ivBytes = b64urlDecode(fmData.iv);
+            const counter = new Uint8Array(16);
+            counter.set(ivBytes, 0);
+            counter[15] = 2;
+
+            const payloadBytes = b64urlDecode(fmData.payload);
+            const ctLen = payloadBytes.length - 16;
+            const ciphertext = payloadBytes.slice(0, ctLen);
+
+            const fmKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CTR' }, false, ['decrypt']);
+            const decrypted = await crypto.subtle.decrypt(
+                { name: 'AES-CTR', counter, length: 32 },
+                fmKey,
+                ciphertext
+            );
+            const plain = new TextDecoder().decode(decrypted);
+
+            const parts = plain.replace(/[{}\[\]]/g, '\n').split('\n');
+            for (const part of parts) {
+                const m1 = part.match(/"url":"([^"]*)".*"height":(\d+)/);
+                const m2 = part.match(/"height":(\d+).*"url":"([^"]*)"/);
+                if (m1) {
+                    let url = m1[1].replace(/\\u0026/g, '&').replace(/\\u003D/g, '=');
+                    allLinks.push({ resolution: m1[2], url });
+                } else if (m2) {
+                    let url = m2[2].replace(/\\u0026/g, '&').replace(/\\u003D/g, '=');
+                    allLinks.push({ resolution: m2[1], url });
+                }
+            }
+        }
+    } catch (e) {
+        // Filemoon provider fetch failed
+    }
+
+    return allLinks;
 }
 
 // Custom hex decoding from anime.sh (provider_init)
@@ -127,6 +195,47 @@ async function getLinks(providerPath) {
     return allLinks;
 }
 
+// Parse tobeparsed/sourceUrls from API response into respLines
+async function parseSourceLines(apiData) {
+    const rawJson = JSON.stringify(apiData);
+    const hasTobeparsed = rawJson.includes('"tobeparsed"');
+    let respLines = [];
+
+    if (hasTobeparsed) {
+        const data = apiData.data;
+        let blobValue = (apiData.tobeparsed) ||
+                        (data && data.tobeparsed) ||
+                        (data && data.episode && data.episode.tobeparsed) ||
+                        null;
+
+        if (!blobValue) {
+            const tbpMatch = rawJson.match(/"tobeparsed":"([^"]*)"/);
+            if (tbpMatch) blobValue = tbpMatch[1];
+        }
+
+        if (blobValue) {
+            const plain = await decrypt(blobValue);
+            if (plain) {
+                const parts = plain.replace(/[{}]/g, '\n').split('\n');
+                for (const part of parts) {
+                    const m = part.match(/"sourceUrl":"--([^"]*)".*"sourceName":"([^"]*)"/);
+                    if (m) respLines.push({ sourceName: m[2], hex: m[1] });
+                }
+            }
+        }
+    } else if (apiData.data && apiData.data.episode && apiData.data.episode.sourceUrls) {
+        const raw = JSON.stringify(apiData.data.episode.sourceUrls);
+        const cleaned = raw.replace(/\\u002F/g, '/').replace(/\\/g, '');
+        const parts = cleaned.replace(/[{}]/g, '\n').split('\n');
+        for (const part of parts) {
+            const m = part.match(/"sourceUrl":"--([^"]*)".*"sourceName":"([^"]*)"/);
+            if (m) respLines.push({ sourceName: m[2], hex: m[1] });
+        }
+    }
+
+    return respLines;
+}
+
 export async function searchAnime(query) {
     const searchGql = `query($search: SearchInput $limit: Int $page: Int $countryOrigin: VaildCountryOriginEnumType) {
         shows( search: $search limit: $limit page: $page countryOrigin: $countryOrigin ) {
@@ -209,41 +318,73 @@ export async function getEpisodeUrl(showId, epNo, mode = 'sub', quality = 'best'
     }`;
 
     try {
-        const data = await apiFetch(episodeEmbedGql, {
-            showId, translationType: mode, episodeString: epNo
-        });
+        let apiData = null;
 
-        const respData = data.data;
-        let respLines = [];
+        // v4.14.0: Try persisted query GET request first (bypasses captcha)
+        try {
+            const queryVars = JSON.stringify({ showId, translationType: mode, episodeString: epNo });
+            const queryExt = JSON.stringify({ persistedQuery: { version: 1, sha256Hash: EPISODE_QUERY_HASH } });
+            const apiUrl = `${ALLANIME_API}/api?variables=${encodeURIComponent(queryVars)}&extensions=${encodeURIComponent(queryExt)}`;
 
-        if (respData.tobeparsed) {
-            const plain = await decrypt(respData.tobeparsed);
-            if (plain) {
-                const parts = plain.replace(/[{}]/g, '\n').split('\n');
-                for (const part of parts) {
-                    const m = part.match(/"sourceUrl":"--([^"]*)".*"sourceName":"([^"]*)"/);
-                    if (m) respLines.push({ sourceName: m[2], hex: m[1] });
-                }
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            const getResp = await fetch(apiUrl, {
+                headers: {
+                    'User-Agent': AGENT,
+                    'Referer': ALLANIME_REFR,
+                    'Origin': 'https://youtu-chan.com'
+                },
+                signal: controller.signal
+            });
+            clearTimeout(timeout);
+
+            const getData = await getResp.json();
+            const rawText = JSON.stringify(getData);
+            if (rawText && rawText.includes('tobeparsed')) {
+                apiData = getData;
             }
-        } else if (respData.episode && respData.episode.sourceUrls) {
-            const raw = JSON.stringify(respData.episode.sourceUrls);
-            const cleaned = raw.replace(/\\u002F/g, '/').replace(/\\/g, '');
-            const parts = cleaned.replace(/[{}]/g, '\n').split('\n');
-            for (const part of parts) {
-                const m = part.match(/"sourceUrl":"--([^"]*)".*"sourceName":"([^"]*)"/);
-                if (m) respLines.push({ sourceName: m[2], hex: m[1] });
-            }
+        } catch (e) {
+            // GET request failed, will fall back to POST
         }
 
+        // Fallback: POST request (original method)
+        if (!apiData) {
+            apiData = await apiFetch(episodeEmbedGql, {
+                showId, translationType: mode, episodeString: epNo
+            });
+        }
+
+        if (apiData.errors && apiData.errors.length > 0) {
+            const captchaErr = apiData.errors.find(e => e.message === 'NEED_CAPTCHA');
+            if (captchaErr) {
+                throw new Error('NEED_CAPTCHA: AllAnime API is currently requiring captcha verification.');
+            }
+            throw new Error(`API Error: ${apiData.errors.map(e => e.message).join(', ')}`);
+        }
+
+        let respLines = await parseSourceLines(apiData);
         if (respLines.length === 0) return null;
 
-        const providerNames = ['Default', 'Yt-mp4', 'S-mp4', 'Luf-Mp4'];
-        const linkPromises = providerNames.map(async (name) => {
-            const entry = respLines.find(r => r.sourceName === name);
+        // Provider order: 1=Default, 2=Yt-mp4, 3=S-mp4, 4=Luf-Mp4, 5=Fm-mp4 (filemoon, new in v4.14.0)
+        const providerDefs = [
+            { name: 'Default', filemoon: false },
+            { name: 'Yt-mp4', filemoon: false },
+            { name: 'S-mp4', filemoon: false },
+            { name: 'Luf-Mp4', filemoon: false },
+            { name: 'Fm-mp4', filemoon: true }
+        ];
+
+        const linkPromises = providerDefs.map(async (prov) => {
+            const entry = respLines.find(r => r.sourceName === prov.name);
             if (!entry) return [];
             const decodedPath = decodeProviderId(entry.hex);
             if (!decodedPath) return [];
-            return getLinks(decodedPath);
+
+            if (prov.filemoon) {
+                return getFilemoonLinks(decodedPath);
+            } else {
+                return getLinks(decodedPath);
+            }
         });
 
         const results = await Promise.all(linkPromises);
@@ -269,6 +410,9 @@ export async function getEpisodeUrl(showId, epNo, mode = 'sub', quality = 'best'
         let finalUrl = selected.url.replace(/([^:])\/\//g, '$1/');
         return finalUrl;
     } catch (e) {
+        if (e.message && e.message.startsWith('NEED_CAPTCHA')) {
+            throw e;
+        }
         return null;
     }
 }
